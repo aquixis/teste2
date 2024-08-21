@@ -1,0 +1,145 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// Definições dos pinos
+#define TEMP_PIN 34       // Pino do termistor
+#define HUMIDITY_PIN 35   // Pino do sensor de umidade analógico
+#define DOOR_PIN 16       // Pino do sensor da porta (digital)
+#define LIGHT_PIN 33      // Pino do sensor de luz (LDR com divisor de tensão, analógico)
+#define LIGHT_RELAY_PIN 18 // Pino para controlar o relé da luz
+
+// Credenciais WiFi
+const char* ssid = "SEU_SSID";
+const char* password = "SUA_SENHA";
+
+// Endereço e porta do broker MQTT
+const char* mqtt_server = "broker.hivemq.com"; // Exemplo de broker público
+const int mqtt_port = 1883;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Variáveis globais para os cronômetros
+unsigned long doorOpenTime = 0;
+unsigned long doorCloseTime = 0;
+unsigned long lightOnTime = 0;
+unsigned long lightOffTime = 0;
+
+bool lastDoorState = LOW;
+bool lastLightState = LOW;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configurando os pinos
+  pinMode(DOOR_PIN, INPUT_PULLUP);
+  pinMode(LIGHT_PIN, INPUT);
+  pinMode(LIGHT_RELAY_PIN, OUTPUT);
+  
+  // Conectando ao WiFi
+  setup_wifi();
+
+  // Configurando o client MQTT
+  client.setServer(mqtt_server, mqtt_port);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  // Leitura dos sensores
+  int tempAnalog = analogRead(TEMP_PIN);
+  int humidityAnalog = analogRead(HUMIDITY_PIN);
+  bool doorState = digitalRead(DOOR_PIN);
+  int lightAnalog = analogRead(LIGHT_PIN);
+
+  // Convertendo as leituras analógicas para valores significativos
+  float temperature = convertToTemperature(tempAnalog);
+  float humidity = convertToHumidity(humidityAnalog);
+  bool lightState = (lightAnalog > 2000); // Exemplo de limiar para definir se a luz está acesa
+
+  // Atualizando os cronômetros com base no estado da porta e da luz
+  if (doorState != lastDoorState) {
+    if (doorState == HIGH) {
+      doorOpenTime = millis();
+    } else {
+      doorCloseTime = millis();
+    }
+    lastDoorState = doorState;
+  }
+
+  if (lightState != lastLightState) {
+    if (lightState) {
+      lightOnTime = millis();
+    } else {
+      lightOffTime = millis();
+    }
+    lastLightState = lightState;
+  }
+
+  // Convertendo os tempos de millis() para segundos
+  unsigned long doorTime = (doorState == HIGH) ? (millis() - doorOpenTime) / 1000 : (millis() - doorCloseTime) / 1000;
+  unsigned long lightTime = lightState ? (millis() - lightOnTime) / 1000 : (millis() - lightOffTime) / 1000;
+
+  // Publicando os dados no MQTT
+  publishMQTT("home/temperature", String(temperature));
+  publishMQTT("home/humidity", String(humidity));
+  publishMQTT("home/door", doorState ? "open" : "closed");
+  publishMQTT("home/door_time", String(doorTime));
+  publishMQTT("home/light", lightState ? "on" : "off");
+  publishMQTT("home/light_time", String(lightTime));
+
+  delay(2000);
+}
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Conectando a ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi conectado");
+  Serial.println("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Tentando conectar ao MQTT...");
+    if (client.connect("ESP32Client")) {
+      Serial.println("conectado");
+    } else {
+      Serial.print("falhou, rc=");
+      Serial.print(client.state());
+      Serial.println(" tentando novamente em 5 segundos");
+      delay(5000);
+    }
+  }
+}
+
+void publishMQTT(const char* topic, const String &payload) {
+  client.publish(topic, payload.c_str());
+}
+
+float convertToTemperature(int analogValue) {
+  // Adicione a lógica para converter o valor analógico do termistor em temperatura.
+  // Isso geralmente envolve usar uma equação específica ou uma tabela de conversão.
+  // Exemplo: Usando a fórmula de Steinhart-Hart ou um modelo simples.
+  return analogValue; // Substitua pelo valor real em °C
+}
+
+float convertToHumidity(int analogValue) {
+  // Adicione a lógica para converter o valor analógico do sensor de umidade em umidade relativa.
+  // Isso dependerá do tipo de sensor que você estiver usando.
+  return analogValue; // Substitua pelo valor real em % de umidade
+}
