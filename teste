@@ -1,0 +1,131 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+
+// Definições dos pinos
+#define DHTPIN 4          // Pino onde o DHT está conectado
+#define DHTTYPE DHT22     // DHT 22  (AM2302), DHT11 pode ser usado também
+#define DOOR_PIN 16       // Pino do sensor da porta
+#define LIGHT_PIN 17      // Pino do sensor de luz (LDR)
+#define LIGHT_RELAY_PIN 18 // Pino para controlar o relé da luz
+
+// Credenciais WiFi
+const char* ssid = "SEU_SSID";
+const char* password = "SUA_SENHA";
+
+// Endereço e porta do broker MQTT
+const char* mqtt_server = "broker.hivemq.com"; // Exemplo de broker público
+const int mqtt_port = 1883;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+DHT dht(DHTPIN, DHTTYPE);
+
+// Variáveis globais para os cronômetros
+unsigned long doorOpenTime = 0;
+unsigned long doorCloseTime = 0;
+unsigned long lightOnTime = 0;
+unsigned long lightOffTime = 0;
+
+bool lastDoorState = LOW;
+bool lastLightState = LOW;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configurando os pinos
+  pinMode(DOOR_PIN, INPUT_PULLUP);
+  pinMode(LIGHT_PIN, INPUT);
+  pinMode(LIGHT_RELAY_PIN, OUTPUT);
+  
+  dht.begin();
+  
+  // Conectando ao WiFi
+  setup_wifi();
+
+  // Configurando o client MQTT
+  client.setServer(mqtt_server, mqtt_port);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  // Leitura dos sensores
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  bool doorState = digitalRead(DOOR_PIN);
+  bool lightState = digitalRead(LIGHT_PIN);
+
+  // Atualizando os cronômetros com base no estado da porta e da luz
+  if (doorState != lastDoorState) {
+    if (doorState == HIGH) {
+      doorOpenTime = millis();
+    } else {
+      doorCloseTime = millis();
+    }
+    lastDoorState = doorState;
+  }
+
+  if (lightState != lastLightState) {
+    if (lightState == HIGH) {
+      lightOnTime = millis();
+    } else {
+      lightOffTime = millis();
+    }
+    lastLightState = lightState;
+  }
+
+  // Convertendo os tempos de millis() para segundos
+  unsigned long doorTime = (doorState == HIGH) ? (millis() - doorOpenTime) / 1000 : (millis() - doorCloseTime) / 1000;
+  unsigned long lightTime = (lightState == HIGH) ? (millis() - lightOnTime) / 1000 : (millis() - lightOffTime) / 1000;
+
+  // Publicando os dados no MQTT
+  publishMQTT("home/temperature", String(t));
+  publishMQTT("home/humidity", String(h));
+  publishMQTT("home/door", doorState ? "open" : "closed");
+  publishMQTT("home/door_time", String(doorTime));
+  publishMQTT("home/light", lightState ? "on" : "off");
+  publishMQTT("home/light_time", String(lightTime));
+
+  delay(2000);
+}
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Conectando a ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi conectado");
+  Serial.println("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Tentando conectar ao MQTT...");
+    if (client.connect("ESP32Client")) {
+      Serial.println("conectado");
+    } else {
+      Serial.print("falhou, rc=");
+      Serial.print(client.state());
+      Serial.println(" tentando novamente em 5 segundos");
+      delay(5000);
+    }
+  }
+}
+
+void publishMQTT(const char* topic, const String &payload) {
+  client.publish(topic, payload.c_str());
+}
