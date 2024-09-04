@@ -1,0 +1,177 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ESP32Servo.h> // Inclui a biblioteca ESP32Servo
+
+// Definições dos pinos
+#define LED_R_PIN 25 // Pino de controle do canal vermelho da fita de LED
+#define LED_G_PIN 26 // Pino de controle do canal verde da fita de LED
+#define LED_B_PIN 27 // Pino de controle do canal azul da fita de LED
+#define TEMP_SENSOR_PIN 32 // Pino do sensor de temperatura (analógico)
+#define SOIL_SENSOR_PIN 34 // Pino do sensor de umidade do solo (analógico)
+#define RELAY_BOMBA_PIN 14 // Pino do relé da bomba
+#define RELAY_SOLENOIDE_PIN 12 // Pino do relé das solenoides
+#define SERVO_PIN 13 // Pino do servo motor
+
+// Configurações de Wi-Fi e MQTT
+const char* ssid = "Seu_SSID";
+const char* password = "Sua_Senha";
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+const char* mqtt_user = ""; // Usuário MQTT, deixe vazio se não for necessário
+const char* mqtt_password = ""; // Senha MQTT, deixe vazio se não for necessário
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+Servo servo; // Instância do objeto Servo
+
+unsigned long previousMillis = 0;
+unsigned long servoOnMillis = 0;
+unsigned long servoInterval = 60000; // Tempo para acionar o servo (em milissegundos)
+unsigned long servoDuration = 5000; // Tempo que o servo ficará acionado (em milissegundos)
+
+int umidadeLimite = 30; // Limite de umidade para ligar a bomba e solenoides
+
+bool servoAcionado = false;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configuração dos pinos de controle dos LEDs
+  pinMode(LED_R_PIN, OUTPUT);
+  pinMode(LED_G_PIN, OUTPUT);
+  pinMode(LED_B_PIN, OUTPUT);
+  
+  // Configuração dos pinos dos sensores
+  pinMode(TEMP_SENSOR_PIN, INPUT);
+  pinMode(SOIL_SENSOR_PIN, INPUT);
+  
+  servo.attach(SERVO_PIN);
+
+  pinMode(RELAY_BOMBA_PIN, OUTPUT);
+  pinMode(RELAY_SOLENOIDE_PIN, OUTPUT);
+  
+  digitalWrite(RELAY_BOMBA_PIN, LOW); // Relé inicialmente desligado
+  digitalWrite(RELAY_SOLENOIDE_PIN, LOW); // Relé inicialmente desligado
+  
+  servo.write(0); // Posiciona o servo na posição inicial
+  
+  // Inicializa as cores do LED como desligadas
+  analogWrite(LED_R_PIN, 0);
+  analogWrite(LED_G_PIN, 0);
+  analogWrite(LED_B_PIN, 0);
+
+  // Conectar ao Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Conectado ao Wi-Fi");
+
+  // Configurar o cliente MQTT
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(mqttCallback);
+  
+  reconnect(); // Conectar ao broker MQTT
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect(); // Reconnect to the MQTT broker if connection is lost
+  }
+  client.loop();
+
+  // Ler a temperatura usando o sensor analógico
+  int tempAnalog = analogRead(TEMP_SENSOR_PIN);
+  float temperatura = map(tempAnalog, 0, 4095, -40, 125); // Mapeia para uma faixa de temperatura
+
+  // Ler a umidade do solo
+  int umidadeSolo = analogRead(SOIL_SENSOR_PIN);
+
+  // Exibir a temperatura e a umidade no monitor serial
+  Serial.print("Temperatura: ");
+  Serial.print(temperatura);
+  Serial.println(" *C");
+
+  Serial.print("Umidade do Solo: ");
+  Serial.println(umidadeSolo);
+
+  // Publicar os dados no broker MQTT
+  char tempStr[10];
+  dtostrf(temperatura, 1, 2, tempStr);
+  client.publish("sensors/temperature", tempStr);
+
+  char soilStr[10];
+  itoa(umidadeSolo, soilStr, 10);
+  client.publish("sensors/soil_moisture", soilStr);
+
+  // Verificar se a umidade do solo está abaixo do limite
+  if (umidadeSolo < umidadeLimite) {
+    digitalWrite(RELAY_BOMBA_PIN, HIGH); // Ligar a bomba
+    digitalWrite(RELAY_SOLENOIDE_PIN, HIGH); // Ligar as solenoides
+    client.publish("actuators/pump", "ON");
+    client.publish("actuators/solenoid", "ON");
+  } else {
+    digitalWrite(RELAY_BOMBA_PIN, LOW); // Desligar a bomba
+    digitalWrite(RELAY_SOLENOIDE_PIN, LOW); // Desligar as solenoides
+    client.publish("actuators/pump", "OFF");
+    client.publish("actuators/solenoid", "OFF");
+  }
+
+  // Gerenciar o acionamento do servo motor e da fita de LED
+  unsigned long currentMillis = millis();
+
+  if (!servoAcionado && (currentMillis - previousMillis >= servoInterval)) {
+    previousMillis = currentMillis;
+    servo.write(90); // Mover o servo para a posição desejada
+    // Ligar as cores da fita de LED (ajustar os valores conforme necessário)
+    analogWrite(LED_R_PIN, 255); // Exemplo de valor máximo para o vermelho
+    analogWrite(LED_G_PIN, 128); // Exemplo de valor médio para o verde
+    analogWrite(LED_B_PIN, 64);  // Exemplo de valor baixo para o azul
+    servoOnMillis = currentMillis;
+    servoAcionado = true;
+    client.publish("actuators/servo", "ON");
+  }
+
+  // Desligar o servo e a fita de LED após o tempo especificado
+  if (servoAcionado && (currentMillis - servoOnMillis >= servoDuration)) {
+    servo.write(0); // Retorna o servo à posição inicial
+    // Desligar as cores da fita de LED
+    analogWrite(LED_R_PIN, 0);
+    analogWrite(LED_G_PIN, 0);
+    analogWrite(LED_B_PIN, 0);
+    servoAcionado = false;
+    client.publish("actuators/servo", "OFF");
+  }
+
+  delay(2000); // Intervalo entre leituras
+}
+
+void reconnect() {
+  // Loop até que a conexão seja estabelecida
+  while (!client.connected()) {
+    Serial.print("Conectando ao MQTT...");
+    if (client.connect("ESP32Client", mqtt_user, mqtt_password)) {
+      Serial.println("Conectado");
+      // Inscrever-se em tópicos, se necessário
+      client.subscribe("control/#");
+    } else {
+      Serial.print("Falha, rc=");
+      Serial.print(client.state());
+      Serial.println(" Tente novamente em 5 segundos");
+      delay(5000);
+    }
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Lê e processa a mensagem recebida
+  Serial.print("Mensagem recebida no tópico [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
